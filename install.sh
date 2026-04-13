@@ -126,8 +126,16 @@ for DDU in "${DDUS[@]}"; do
         echo "      username: ${USERNAME}" >> "$CONFIG_FILE"
         echo "      password: ${PASSWORD}" >> "$CONFIG_FILE"
     else
-        echo "    Auth: DH cookie (paste from browser after logging into Airflow)"
-        echo "    Tip: run this in DevTools Console → copy(document.cookie)"
+        echo "    Auth: DH cookie required."
+        echo ""
+        echo "    How to get your cookie:"
+        echo "      1. Open Chrome and go to $BASE_URL"
+        echo "      2. Log in with your DH Google account"
+        echo "      3. Press Cmd+Option+J (Mac) to open DevTools Console"
+        echo "      4. Paste this and press Enter: copy(document.cookie)"
+        echo "      5. Your clipboard now has the cookie — paste it below"
+        echo "    Note: cookies expire in ~24h. Re-run this script to refresh."
+        echo ""
         echo "    Session cookie (or press Enter to skip for now):"
         read -r COOKIE
         echo "    auth:" >> "$CONFIG_FILE"
