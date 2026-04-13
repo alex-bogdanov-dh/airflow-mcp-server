@@ -125,7 +125,9 @@ for DDU in "${DDUS[@]}"; do
         echo "      password: ${PASSWORD}" >> "$CONFIG_FILE"
     else
         echo "    Auth: DH cookie (paste from browser after logging into Airflow)"
-        read -rp "    Session cookie (or press Enter to skip for now): " COOKIE
+        echo "    Tip: run this in browser DevTools Console: copy(document.cookie)"
+        echo "    Session cookie (or press Enter to skip for now):"
+        read -r COOKIE
         echo "    auth:" >> "$CONFIG_FILE"
         echo "      type: dh_cookie" >> "$CONFIG_FILE"
         echo "      session_cookie: \"${COOKIE}\"" >> "$CONFIG_FILE"
