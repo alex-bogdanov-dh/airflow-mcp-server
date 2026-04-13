@@ -1,0 +1,12 @@
+# Config for local Docker Airflow (started via docker-compose.yaml).
+# Usage: AIRFLOW_MCP_CONFIG=config.docker.yaml airflow-mcp validate
+
+default_ddu: local
+
+instances:
+  local:
+    base_url: "http://localhost:8080"
+    auth:
+      type: basic
+      username: airflow
+      password: airflow

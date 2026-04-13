@@ -143,15 +143,44 @@ You can also set the config path via env var:
 
 Targets Airflow 3.x REST API v2 (`/api/v2/`) exclusively. No v1 support.
 
+## Local Airflow (Docker)
+
+Spin up a local Airflow for testing:
+
+```bash
+docker compose up -d
+# Wait ~30s for init, then:
+AIRFLOW_MCP_CONFIG=config.docker.yaml airflow-mcp validate
+```
+
+Web UI at http://localhost:8080 (admin: airflow/airflow). Shut down: `docker compose down -v`.
+
+## Validate Config
+
+Check that your config is valid and all instances are reachable:
+
+```bash
+airflow-mcp validate
+```
+
+This loads the config, tests connectivity to each instance, and reports Airflow version.
+
 ## Development
 
 ```bash
 uv venv && source .venv/bin/activate
-uv pip install -e .
+uv pip install -e ".[dev]"
 
-# Run directly
+# Run tests (45 tests, no Airflow required)
+pytest
+
+# Run server directly
 python -m airflow_mcp.server
 ```
+
+## Reliability
+
+Transient errors (HTTP 429, 502, 503) are automatically retried with exponential backoff (3 attempts, max 5s between retries). Permanent errors (401, 404, etc.) fail immediately.
 
 ## License
 
