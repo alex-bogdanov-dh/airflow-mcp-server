@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/abogdanov/airflow-mcp-server.git"
+REPO_URL="https://github.com/alex-bogdanov-dh/airflow-mcp-server.git"
 INSTALL_DIR="${AIRFLOW_MCP_DIR:-$HOME/airflow-mcp-server}"
 CONFIG_DIR="$HOME/.config/airflow-mcp"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
