@@ -1,8 +1,4 @@
-"""Airflow MCP Server — multi-instance, pluggable auth, Airflow 3.x API v2.
-
-Provides tools, prompts, and resources for interacting with Apache Airflow
-instances from Claude Code or any MCP client.
-"""
+"""Airflow MCP Server — multi-instance, pluggable auth, Airflow 3.x API v2."""
 
 from __future__ import annotations
 
@@ -13,12 +9,14 @@ from typing import Annotated, Literal
 from fastmcp import FastMCP
 
 from .client import AirflowClient
-from .config import VERSION, Config
+from .config import Config, get_version
 
 mcp = FastMCP("Airflow MCP Server")
 
 _config: Config | None = None
 _clients: dict[str, AirflowClient] = {}
+
+MAX_CONCURRENT_REQUESTS = 10
 
 
 def _get_config() -> Config:
@@ -48,12 +46,35 @@ def _format_error(tool_name: str, e: Exception) -> str:
     return f"Error in {tool_name}: {type(e).__name__}: {e}"
 
 
+def _format_run(run: dict) -> str:
+    """Format a DAG run as a single line."""
+    return (
+        f"  {run.get('dag_run_id', '?')} | "
+        f"state={run.get('state', '?')} | "
+        f"start={run.get('start_date', '?')} | "
+        f"end={run.get('end_date', '-')}"
+    )
+
+
+async def _check_latest_run(
+    client: AirflowClient, dag_id: str, sem: asyncio.Semaphore,
+) -> tuple[str, str, dict | None]:
+    """Check a DAG's latest run. Returns (dag_id, state, run_dict_or_None)."""
+    async with sem:
+        try:
+            runs_data = await client.get(
+                f"/dags/{dag_id}/dagRuns",
+                params={"limit": 1, "order_by": "-start_date"},
+            )
+            runs = _extract_list(runs_data, "dag_runs")
+            if runs:
+                return dag_id, runs[0].get("state", "unknown"), runs[0]
+            return dag_id, "no_runs", None
+        except Exception as exc:
+            return dag_id, f"error: {type(exc).__name__}: {exc}", None
+
+
 DagState = Literal["success", "failed", "running", "queued"]
-
-
-# ==========================================================================
-# RESOURCES — discoverability for AI agents
-# ==========================================================================
 
 
 @mcp.resource("airflow://instances")
@@ -74,22 +95,11 @@ def list_instances() -> str:
 def server_version() -> str:
     """Server version and capabilities summary."""
     return json.dumps({
-        "version": VERSION,
+        "version": get_version(),
         "api": "Airflow 3.x REST API v2 (/api/v2/)",
-        "tools": [
-            "get_task_logs", "get_dag_runs", "get_failing_dags",
-            "trigger_dag", "pause_dag", "unpause_dag", "get_connections",
-            "diagnose_dag_run", "get_dag_overview", "morning_standup",
-            "get_task_instances",
-        ],
-        "prompts": ["troubleshoot_failing_dag", "daily_health_check"],
         "auth_types": ["basic", "dh_cookie", "dh_service_account"],
+        "prompts": ["troubleshoot_failing_dag", "daily_health_check"],
     }, indent=2)
-
-
-# ==========================================================================
-# CORE TOOLS — direct API wrappers
-# ==========================================================================
 
 
 @mcp.tool
@@ -108,17 +118,10 @@ async def get_task_logs(
     Example: get_task_logs(dag_id="etl_orders", run_id="scheduled__2026-04-13T00:00:00+00:00", task_id="load_to_bq")
     """
     client = _client(ddu)
-    path = f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{task_id}/logs/{try_number}"
     try:
-        return await client.get_text(path, params={"full_content": "true"})
-    except Exception:
-        try:
-            data = await client.get(path, params={"full_content": "true"})
-            if isinstance(data, dict) and "content" in data:
-                return data["content"]
-            return json.dumps(data, indent=2)
-        except Exception as e:
-            return _format_error("get_task_logs", e)
+        return await client.fetch_task_log(dag_id, run_id, task_id, try_number)
+    except Exception as e:
+        return _format_error("get_task_logs", e)
 
 
 @mcp.tool
@@ -145,16 +148,10 @@ async def get_dag_runs(
         return _format_error("get_dag_runs", e)
 
     runs = _extract_list(data, "dag_runs")
-    lines = []
-    for run in runs:
-        lines.append(
-            f"  {run.get('dag_run_id', '?')} | "
-            f"state={run.get('state', '?')} | "
-            f"start={run.get('start_date', '?')} | "
-            f"end={run.get('end_date', '-')}"
-        )
+    if not runs:
+        return f"No runs found for '{dag_id}'."
     header = f"DAG runs for '{dag_id}'" + (f" (state={state})" if state else "")
-    return header + "\n" + "\n".join(lines) if lines else f"No runs found for '{dag_id}'."
+    return header + "\n" + "\n".join(_format_run(r) for r in runs)
 
 
 @mcp.tool
@@ -164,8 +161,8 @@ async def get_failing_dags(
 ) -> str:
     """Find all DAGs whose most recent run failed.
 
-    Checks every active DAG's latest run concurrently. Use this for a quick
-    health check or morning standup. For a richer view, use morning_standup instead.
+    Checks every active DAG's latest run concurrently (capped at 10 parallel requests).
+    Use this for a quick health check. For a richer view, use morning_standup instead.
 
     Example: get_failing_dags(ddu="eiga")
     """
@@ -177,28 +174,18 @@ async def get_failing_dags(
         return _format_error("get_failing_dags", e)
 
     dags = _extract_list(dags_data, "dags")
-
-    async def check_dag(dag_id: str) -> str | None:
-        try:
-            runs_data = await client.get(
-                f"/dags/{dag_id}/dagRuns",
-                params={"limit": 1, "order_by": "-start_date"},
-            )
-            runs = _extract_list(runs_data, "dag_runs")
-            if runs and runs[0].get("state") == "failed":
-                return (
-                    f"  {dag_id} | "
-                    f"run={runs[0].get('dag_run_id', '?')} | "
-                    f"failed at {runs[0].get('end_date', '?')}"
-                )
-        except Exception as exc:
-            return f"  {dag_id} | error: {type(exc).__name__}: {exc}"
-        return None
+    sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
     results = await asyncio.gather(
-        *(check_dag(dag["dag_id"]) for dag in dags if dag.get("dag_id"))
+        *(_check_latest_run(client, d["dag_id"], sem) for d in dags if d.get("dag_id"))
     )
-    failing = [r for r in results if r is not None]
+
+    failing = []
+    for dag_id, state, run in results:
+        if state == "failed" and run:
+            failing.append(f"  {dag_id} | run={run.get('dag_run_id', '?')} | failed at {run.get('end_date', '?')}")
+        elif state.startswith("error:"):
+            failing.append(f"  {dag_id} | {state}")
 
     if not failing:
         return "No failing DAGs found. All clear."
@@ -302,12 +289,6 @@ async def get_connections(
     return f"Connections ({len(lines)}):\n" + "\n".join(lines) if lines else "No connections found."
 
 
-# ==========================================================================
-# COMPOSITE TOOLS — multi-step workflows in a single call
-# These are designed to reduce token cost for weaker/cheaper models (Sonnet).
-# ==========================================================================
-
-
 @mcp.tool
 async def get_task_instances(
     dag_id: Annotated[str, "The DAG ID"],
@@ -330,9 +311,7 @@ async def get_task_instances(
     tasks = _extract_list(data, "task_instances")
     lines = [f"Task instances for '{dag_id}' run '{run_id}' ({len(tasks)} tasks):"]
     for t in tasks:
-        duration = ""
-        if t.get("duration") is not None:
-            duration = f" ({t['duration']:.1f}s)"
+        duration = f" ({t['duration']:.1f}s)" if t.get("duration") is not None else ""
         state_icon = {"success": "+", "failed": "X", "running": "~", "upstream_failed": "!"}.get(
             t.get("state", ""), "?"
         )
@@ -365,7 +344,6 @@ async def diagnose_dag_run(
     client = _client(ddu)
     sections: list[str] = []
 
-    # Step 1: Find the run
     if not run_id:
         try:
             runs_data = await client.get(
@@ -376,14 +354,11 @@ async def diagnose_dag_run(
             if not runs:
                 return f"No failed runs found for DAG '{dag_id}'."
             run_id = runs[0].get("dag_run_id")
-            sections.append(
-                f"Most recent failed run: {run_id}\n"
-                f"  start={runs[0].get('start_date', '?')} | end={runs[0].get('end_date', '?')}"
-            )
+            sections.append(f"Most recent failed run: {run_id}")
+            sections.append(_format_run(runs[0]))
         except Exception as e:
             return _format_error("diagnose_dag_run", e)
 
-    # Step 2: Get task instances
     try:
         ti_data = await client.get(f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances")
     except Exception as e:
@@ -394,29 +369,20 @@ async def diagnose_dag_run(
     total = len(tasks)
     succeeded = sum(1 for t in tasks if t.get("state") == "success")
 
-    sections.append(
-        f"\nTask summary: {total} total, {succeeded} succeeded, {len(failed_tasks)} failed"
-    )
+    sections.append(f"\nTask summary: {total} total, {succeeded} succeeded, {len(failed_tasks)} failed")
 
     if not failed_tasks:
-        # Show all task states if nothing explicitly failed
         for t in tasks:
             sections.append(f"  {t.get('task_id', '?')}: {t.get('state', '?')}")
         return "\n".join(sections)
 
-    # Step 3: Fetch logs for each failed task (concurrently, max 5)
     async def fetch_failed_log(task: dict) -> str:
         tid = task.get("task_id", "?")
         try_num = task.get("try_number", 1)
-        path = f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/{tid}/logs/{try_num}"
         try:
-            log_text = await client.get_text(path, params={"full_content": "true"})
-        except Exception:
-            try:
-                log_data = await client.get(path, params={"full_content": "true"})
-                log_text = log_data.get("content", json.dumps(log_data)) if isinstance(log_data, dict) else str(log_data)
-            except Exception as exc:
-                log_text = f"(could not fetch logs: {exc})"
+            log_text = await client.fetch_task_log(dag_id, run_id, tid, try_num)
+        except Exception as exc:
+            log_text = f"(could not fetch logs: {exc})"
 
         # Truncate long logs to last 80 lines to save tokens
         log_lines = log_text.strip().split("\n")
@@ -426,7 +392,7 @@ async def diagnose_dag_run(
         return f"\n--- Failed task: {tid} (try #{try_num}) ---\n{log_text}"
 
     log_results = await asyncio.gather(
-        *(fetch_failed_log(t) for t in failed_tasks[:5])  # cap at 5 to avoid huge responses
+        *(fetch_failed_log(t) for t in failed_tasks[:5])
     )
     sections.extend(log_results)
 
@@ -473,13 +439,7 @@ async def get_dag_overview(
     runs = _extract_list(runs_data, "dag_runs")
     if runs:
         lines.append(f"\nRecent runs ({len(runs)}):")
-        for run in runs:
-            lines.append(
-                f"  {run.get('dag_run_id', '?')} | "
-                f"state={run.get('state', '?')} | "
-                f"start={run.get('start_date', '?')} | "
-                f"end={run.get('end_date', '-')}"
-            )
+        lines.extend(_format_run(r) for r in runs)
     else:
         lines.append("\nNo recent runs.")
 
@@ -509,33 +469,23 @@ async def morning_standup(
 
     dags = _extract_list(dags_data, "dags")
     paused_count = sum(1 for d in dags if d.get("is_paused"))
+    active_dags = [d for d in dags if d.get("dag_id") and not d.get("is_paused")]
 
-    async def check_dag_status(dag_id: str) -> tuple[str, str | None, str | None]:
-        """Returns (dag_id, failed_info_or_none, running_info_or_none)."""
-        try:
-            runs_data = await client.get(
-                f"/dags/{dag_id}/dagRuns",
-                params={"limit": 1, "order_by": "-start_date"},
-            )
-            runs = _extract_list(runs_data, "dag_runs")
-            if not runs:
-                return dag_id, None, None
-            latest = runs[0]
-            state = latest.get("state", "?")
-            if state == "failed":
-                return dag_id, f"  {dag_id} | run={latest.get('dag_run_id', '?')} | failed at {latest.get('end_date', '?')}", None
-            elif state == "running":
-                return dag_id, None, f"  {dag_id} | run={latest.get('dag_run_id', '?')} | started {latest.get('start_date', '?')}"
-            return dag_id, None, None
-        except Exception:
-            return dag_id, f"  {dag_id} | error checking status", None
-
+    sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     results = await asyncio.gather(
-        *(check_dag_status(d["dag_id"]) for d in dags if d.get("dag_id") and not d.get("is_paused"))
+        *(_check_latest_run(client, d["dag_id"], sem) for d in active_dags)
     )
 
-    failing = [r[1] for r in results if r[1]]
-    running = [r[2] for r in results if r[2]]
+    failing = []
+    running = []
+    for dag_id, state, run in results:
+        if state == "failed" and run:
+            failing.append(f"  {dag_id} | run={run.get('dag_run_id', '?')} | failed at {run.get('end_date', '?')}")
+        elif state == "running" and run:
+            running.append(f"  {dag_id} | run={run.get('dag_run_id', '?')} | started {run.get('start_date', '?')}")
+        elif state.startswith("error:"):
+            failing.append(f"  {dag_id} | {state}")
+
     healthy = len(results) - len(failing) - len(running)
 
     sections = [
@@ -555,11 +505,6 @@ async def morning_standup(
     sections.append(f"\nHealthy: {healthy} DAGs with successful latest run")
 
     return "\n".join(sections)
-
-
-# ==========================================================================
-# PROMPTS — guided multi-step workflows for AI agents
-# ==========================================================================
 
 
 @mcp.prompt
@@ -617,11 +562,6 @@ def daily_health_check(ddu: str = "") -> str:
 4. If any DAGs need immediate re-runs:
    Call: trigger_dag(dag_id="<dag_id>"{ddu_arg})
 """
-
-
-# ==========================================================================
-# Entry point
-# ==========================================================================
 
 
 def main():

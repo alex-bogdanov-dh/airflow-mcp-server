@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 import yaml
@@ -15,7 +16,12 @@ CONFIG_SEARCH_PATHS = [
     Path.home() / ".config" / "airflow-mcp" / "config.yaml",
 ]
 
-VERSION = "0.1.0"
+
+def get_version() -> str:
+    try:
+        return pkg_version("airflow-mcp-server")
+    except Exception:
+        return "0.1.0-dev"
 
 
 @dataclass
