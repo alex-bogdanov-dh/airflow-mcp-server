@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Airflow MCP Server — Interactive Setup
 # Usage: bash install.sh
-# Or:    curl -s https://raw.githubusercontent.com/<user>/airflow-mcp-server/main/install.sh | bash
+# Or:    curl -s https://raw.githubusercontent.com/alex-bogdanov-dh/airflow-mcp-server/main/install.sh | bash
 
 set -euo pipefail
 
@@ -9,6 +9,7 @@ REPO_URL="https://github.com/alex-bogdanov-dh/airflow-mcp-server.git"
 INSTALL_DIR="${AIRFLOW_MCP_DIR:-$HOME/airflow-mcp-server}"
 CONFIG_DIR="$HOME/.config/airflow-mcp"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
+CLAUDE_JSON="$HOME/.claude.json"
 
 echo "╔══════════════════════════════════════════════╗"
 echo "║   Airflow MCP Server — Interactive Setup     ║"
@@ -43,17 +44,21 @@ echo ""
 # --- Clone or update ---
 echo "[2/5] Setting up project..."
 
-if [ -d "$INSTALL_DIR" ]; then
+if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/pyproject.toml" ]; then
+    # Valid existing installation — update it
     echo "  Found existing installation at $INSTALL_DIR"
     cd "$INSTALL_DIR"
     git pull --quiet 2>/dev/null || echo "  (could not pull — using existing)"
+elif [ -d "$INSTALL_DIR" ]; then
+    # Directory exists but is not a valid project — remove and re-clone
+    echo "  Found incomplete installation at $INSTALL_DIR — removing and re-cloning..."
+    rm -rf "$INSTALL_DIR"
+    echo "  Cloning to $INSTALL_DIR..."
+    git clone --quiet "$REPO_URL" "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
 else
     echo "  Cloning to $INSTALL_DIR..."
-    git clone --quiet "$REPO_URL" "$INSTALL_DIR" 2>/dev/null || {
-        echo "  Could not clone repo. Creating local installation instead."
-        echo "  You'll need to copy the project files manually."
-        mkdir -p "$INSTALL_DIR"
-    }
+    git clone --quiet "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
@@ -82,10 +87,7 @@ mkdir -p "$CONFIG_DIR"
 
 # DH DDU registry (known instances)
 echo "Known Delivery Hero DDUs:"
-echo "  eiga (Japan) · paa (APAC) · fpk (Korea) · fpt (Thailand)"
-echo "  fps (Singapore) · fpm (Malaysia) · tlb (Talabat/MENA)"
-echo "  hun (Hungerstation) · ped (PedidosYa) · gfg (GFG)"
-echo "  dhp (DH Platform) · and more..."
+echo "  eiga · paa · fpk · fpt · fps · fpm · tlb · hun · ped · gfg · dhp · and more..."
 echo ""
 
 read -rp "Enter DDU codes to configure (space-separated, e.g. 'eiga paa'): " DDU_INPUT
@@ -125,7 +127,7 @@ for DDU in "${DDUS[@]}"; do
         echo "      password: ${PASSWORD}" >> "$CONFIG_FILE"
     else
         echo "    Auth: DH cookie (paste from browser after logging into Airflow)"
-        echo "    Tip: run this in browser DevTools Console: copy(document.cookie)"
+        echo "    Tip: run this in DevTools Console → copy(document.cookie)"
         echo "    Session cookie (or press Enter to skip for now):"
         read -r COOKIE
         echo "    auth:" >> "$CONFIG_FILE"
@@ -139,24 +141,47 @@ echo ""
 echo "  ✓ Config written to $CONFIG_FILE"
 echo ""
 
-# --- Claude Code settings ---
-echo "[5/5] Claude Code integration..."
-echo ""
-echo "Add this to your Claude Code MCP settings:"
-echo "(~/.claude/settings.json → mcpServers)"
-echo ""
-echo "  \"airflow\": {"
-echo "    \"command\": \"$INSTALL_DIR/.venv/bin/python\","
-echo "    \"args\": [\"-m\", \"airflow_mcp.server\"],"
-echo "    \"cwd\": \"$INSTALL_DIR/src\","
-echo "    \"env\": {"
-echo "      \"AIRFLOW_MCP_CONFIG\": \"$CONFIG_FILE\""
-echo "    }"
-echo "  }"
-echo ""
+# --- Claude Code integration (auto-write to ~/.claude.json) ---
+echo "[5/5] Wiring into Claude Code..."
+
+PYTHON_BIN="$INSTALL_DIR/.venv/bin/python"
+
+python3 - << PYEOF
+import json, os, sys
+
+claude_json = os.path.expanduser("$CLAUDE_JSON")
+install_dir = "$INSTALL_DIR"
+config_file = "$CONFIG_FILE"
+
+entry = {
+    "type": "stdio",
+    "command": f"{install_dir}/.venv/bin/python",
+    "args": ["-m", "airflow_mcp.server"],
+    "env": {
+        "AIRFLOW_MCP_CONFIG": config_file
+    }
+}
+
+if os.path.exists(claude_json):
+    with open(claude_json) as f:
+        d = json.load(f)
+else:
+    d = {}
+
+if "mcpServers" not in d:
+    d["mcpServers"] = {}
+
+d["mcpServers"]["airflow"] = entry
+
+with open(claude_json, "w") as f:
+    json.dump(d, f, indent=4)
+
+print(f"  ✓ MCP server registered in {claude_json}")
+PYEOF
 
 # --- Validate ---
-echo "Validating config..."
+echo ""
+echo "Validating connectivity..."
 AIRFLOW_MCP_CONFIG="$CONFIG_FILE" "$INSTALL_DIR/.venv/bin/python" -m airflow_mcp.cli validate 2>&1 || true
 
 echo ""
@@ -164,7 +189,6 @@ echo "╔═══════════════════════�
 echo "║   Setup complete!                            ║"
 echo "║                                              ║"
 echo "║   Next steps:                                ║"
-echo "║   1. Add the MCP settings above to Claude    ║"
-echo "║   2. Restart Claude Code                     ║"
-echo "║   3. Try: 'check my airflow standup'         ║"
+echo "║   1. Restart Claude Code                     ║"
+echo "║   2. Try: 'check my airflow standup'         ║"
 echo "╚══════════════════════════════════════════════╝"
