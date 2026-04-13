@@ -10,6 +10,7 @@ from fastmcp import FastMCP
 
 from .client import AirflowClient
 from .config import Config, get_version
+from .usage import track
 
 mcp = FastMCP("Airflow MCP Server")
 
@@ -117,6 +118,7 @@ async def get_task_logs(
 
     Example: get_task_logs(dag_id="etl_orders", run_id="scheduled__2026-04-13T00:00:00+00:00", task_id="load_to_bq")
     """
+    track("get_task_logs")
     client = _client(ddu)
     try:
         return await client.fetch_task_log(dag_id, run_id, task_id, try_number)
@@ -341,6 +343,7 @@ async def diagnose_dag_run(
     Example: diagnose_dag_run(dag_id="etl_orders", ddu="eiga")
     Example: diagnose_dag_run(dag_id="etl_orders", run_id="manual__2026-04-13T10:00:00+00:00")
     """
+    track("diagnose_dag_run")
     client = _client(ddu)
     sections: list[str] = []
 
@@ -460,6 +463,7 @@ async def morning_standup(
 
     Example: morning_standup(ddu="eiga")
     """
+    track("morning_standup")
     client = _client(ddu)
 
     try:
@@ -505,6 +509,165 @@ async def morning_standup(
     sections.append(f"\nHealthy: {healthy} DAGs with successful latest run")
 
     return "\n".join(sections)
+
+
+@mcp.tool
+async def slack_standup(
+    ddu: Annotated[str | None, "DDU instance code. Uses default if omitted."] = None,
+    dag_limit: Annotated[int, "Max DAGs to check"] = 100,
+) -> str:
+    """Generate a Slack-ready standup message — paste directly into your team channel.
+
+    Returns Slack mrkdwn formatted output with bold DAG names, bullet points,
+    and a clean summary. Copy-paste ready, no editing needed.
+
+    Example: slack_standup(ddu="eiga")
+    """
+    track("slack_standup")
+    client = _client(ddu)
+
+    try:
+        dags_data = await client.get("/dags", params={"limit": dag_limit, "only_active": "true"})
+    except Exception as e:
+        return _format_error("slack_standup", e)
+
+    dags = _extract_list(dags_data, "dags")
+    paused_count = sum(1 for d in dags if d.get("is_paused"))
+    active_dags = [d for d in dags if d.get("dag_id") and not d.get("is_paused")]
+
+    sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    results = await asyncio.gather(
+        *(_check_latest_run(client, d["dag_id"], sem) for d in active_dags)
+    )
+
+    failing = []
+    running = []
+    for dag_id, state, run in results:
+        if state == "failed" and run:
+            failing.append((dag_id, run))
+        elif state == "running" and run:
+            running.append((dag_id, run))
+
+    healthy = len(results) - len(failing) - len(running)
+    ddu_label = ddu or _get_config().default_ddu
+
+    lines = [f":airflow: *Airflow Standup — {ddu_label}*"]
+
+    if failing:
+        lines.append(f"\n:red_circle: *Failing ({len(failing)})*")
+        for dag_id, run in failing:
+            lines.append(f"• *{dag_id}* — failed at {run.get('end_date', '?')}")
+    else:
+        lines.append("\n:large_green_circle: *No failing DAGs*")
+
+    if running:
+        lines.append(f"\n:hourglass_flowing_sand: *Running ({len(running)})*")
+        for dag_id, run in running:
+            lines.append(f"• *{dag_id}* — started {run.get('start_date', '?')}")
+
+    lines.append(f"\n:chart_with_upwards_trend: {healthy} healthy · {paused_count} paused · {len(active_dags)} active")
+
+    return "\n".join(lines)
+
+
+@mcp.tool
+async def alert_context(
+    dag_id: Annotated[str, "The DAG ID from the alert/incident"],
+    ddu: Annotated[str | None, "DDU instance code. Uses default if omitted."] = None,
+) -> str:
+    """Quick incident response — get everything you need to respond to an alert.
+
+    When you get paged about a DAG, call this with just the dag_id. It returns:
+    - DAG overview (schedule, owner, tags)
+    - Latest failed run details
+    - Failed task logs (auto-fetched)
+    - Connection info if relevant
+
+    Designed to replace the "open browser, navigate 5 pages" workflow
+    with a single tool call.
+
+    Example: alert_context(dag_id="etl_orders_daily", ddu="eiga")
+    """
+    track("alert_context")
+    client = _client(ddu)
+    sections: list[str] = [f"=== Alert Context: {dag_id} ==="]
+
+    # DAG overview
+    try:
+        dag_data = await client.get(f"/dags/{dag_id}")
+        sections.append(f"\nSchedule: {dag_data.get('timetable_summary', dag_data.get('schedule_interval', '?'))}")
+        sections.append(f"Owner: {', '.join(dag_data.get('owners', ['?']))}")
+        sections.append(f"Paused: {dag_data.get('is_paused', '?')}")
+        tags = dag_data.get("tags", [])
+        if tags:
+            tag_names = [t.get("name", t) if isinstance(t, dict) else t for t in tags]
+            sections.append(f"Tags: {', '.join(tag_names)}")
+    except Exception as e:
+        sections.append(f"\nDAG details: {_format_error('get_dag', e)}")
+
+    # Diagnosis (reuses diagnose_dag_run logic)
+    sections.append("\n--- Diagnosis ---")
+    diagnosis = await diagnose_dag_run(dag_id, ddu=ddu)
+    sections.append(diagnosis)
+
+    return "\n".join(sections)
+
+
+@mcp.tool
+async def get_team_dags(
+    team: Annotated[str, "Team prefix to filter DAGs by, e.g. 'identity', 'logistics', 'payments'"],
+    ddu: Annotated[str | None, "DDU instance code. Uses default if omitted."] = None,
+    limit: Annotated[int, "Max DAGs to return"] = 100,
+) -> str:
+    """List DAGs owned by a specific team (filtered by DAG ID prefix or owner tag).
+
+    DH DAGs often follow naming conventions like {team}_{domain}_{action}.
+    This tool filters DAGs matching the team prefix in the dag_id or owner field.
+
+    Example: get_team_dags(team="identity", ddu="eiga")
+    """
+    track("get_team_dags")
+    client = _client(ddu)
+
+    try:
+        data = await client.get("/dags", params={"limit": limit, "only_active": "true"})
+    except Exception as e:
+        return _format_error("get_team_dags", e)
+
+    dags = _extract_list(data, "dags")
+    team_lower = team.lower()
+
+    matched = []
+    for dag in dags:
+        dag_id = dag.get("dag_id", "")
+        owners = dag.get("owners", [])
+        tags = dag.get("tags", [])
+        tag_names = [t.get("name", t) if isinstance(t, dict) else t for t in tags]
+
+        if (
+            dag_id.lower().startswith(team_lower)
+            or any(team_lower in o.lower() for o in owners)
+            or any(team_lower in t.lower() for t in tag_names)
+        ):
+            status = "paused" if dag.get("is_paused") else "active"
+            matched.append(f"  {dag_id} | owner={', '.join(owners)} | {status}")
+
+    if not matched:
+        return f"No DAGs found matching team '{team}'."
+    return f"DAGs for team '{team}' ({len(matched)}):\n" + "\n".join(matched)
+
+
+@mcp.tool
+async def usage_stats() -> str:
+    """Show usage statistics for this MCP server (local-only tracking).
+
+    Enable tracking with AIRFLOW_MCP_TRACK_USAGE=1 in your environment.
+    All data is stored locally, no telemetry.
+
+    Example: usage_stats()
+    """
+    from .usage import get_stats
+    return get_stats()
 
 
 @mcp.prompt

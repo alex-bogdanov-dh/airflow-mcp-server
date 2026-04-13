@@ -1,12 +1,12 @@
 # Airflow MCP Server Configuration
-# Copy to config.yaml and edit for your setup.
+# Copy to config.yaml (or ~/.config/airflow-mcp/config.yaml) and edit.
+# Alternatively, run `bash install.sh` for interactive setup.
 
 # Default DDU used when no ddu parameter is passed to a tool.
 default_ddu: local
 
-# Map of DDU codes to Airflow instances.
-# Each entry needs a base_url and an auth section.
 instances:
+  # --- Local development (docker-compose up) ---
   local:
     base_url: "http://localhost:8080"
     auth:
@@ -14,15 +14,57 @@ instances:
       username: airflow
       password: airflow
 
-  # Delivery Hero examples (uncomment and configure):
+  # --- Delivery Hero instances ---
+  # DH Airflow follows the pattern: airflow-{ddu}.datahub.deliveryhero.net
+  # Auth: paste your session cookie from the browser after logging in via SSO.
+  # Cookies expire after hours/days — refresh by logging in again.
+  #
+  # Uncomment and configure the DDUs you work with:
+
   # eiga:
   #   base_url: "https://airflow-eiga.datahub.deliveryhero.net"
   #   auth:
   #     type: dh_cookie
-  #     session_cookie: ""  # paste from browser
-  #
+  #     session_cookie: ""  # paste full cookie string from browser DevTools
+
   # paa:
   #   base_url: "https://airflow-paa.datahub.deliveryhero.net"
+  #   auth:
+  #     type: dh_cookie
+  #     session_cookie: ""
+
+  # tlb:
+  #   base_url: "https://airflow-tlb.datahub.deliveryhero.net"
+  #   auth:
+  #     type: dh_cookie
+  #     session_cookie: ""
+
+  # fpk:
+  #   base_url: "https://airflow-fpk.datahub.deliveryhero.net"
+  #   auth:
+  #     type: dh_cookie
+  #     session_cookie: ""
+
+  # hun:
+  #   base_url: "https://airflow-hun.datahub.deliveryhero.net"
+  #   auth:
+  #     type: dh_cookie
+  #     session_cookie: ""
+
+  # ped:
+  #   base_url: "https://airflow-ped.datahub.deliveryhero.net"
+  #   auth:
+  #     type: dh_cookie
+  #     session_cookie: ""
+
+  # gfg:
+  #   base_url: "https://airflow-gfg.datahub.deliveryhero.net"
+  #   auth:
+  #     type: dh_cookie
+  #     session_cookie: ""
+
+  # dhp:
+  #   base_url: "https://airflow-dhp.datahub.deliveryhero.net"
   #   auth:
   #     type: dh_cookie
   #     session_cookie: ""

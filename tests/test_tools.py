@@ -329,3 +329,90 @@ async def test_morning_standup(mock_setup):
         assert "Currently running (1)" in result
         assert "Healthy: 1" in result
         assert "1 paused" in result
+
+
+# --- slack_standup ---
+
+@pytest.mark.asyncio
+async def test_slack_standup(mock_setup):
+    with respx.mock(base_url="http://airflow.test/api/v2") as router:
+        router.get("/dags").respond(json={
+            "dags": [
+                {"dag_id": "ok_dag", "is_paused": False},
+                {"dag_id": "broken_dag", "is_paused": False},
+            ]
+        })
+        router.get("/dags/ok_dag/dagRuns").respond(json={
+            "dag_runs": [{"dag_run_id": "r1", "state": "success", "start_date": "2026-04-13T00:00:00Z", "end_date": "2026-04-13T01:00:00Z"}]
+        })
+        router.get("/dags/broken_dag/dagRuns").respond(json={
+            "dag_runs": [{"dag_run_id": "r2", "state": "failed", "start_date": "2026-04-13T00:00:00Z", "end_date": "2026-04-13T00:30:00Z"}]
+        })
+        result = await srv.slack_standup()
+        # Verify Slack formatting
+        assert ":airflow:" in result
+        assert "*broken_dag*" in result
+        assert ":red_circle:" in result
+        assert ":chart_with_upwards_trend:" in result
+
+
+# --- alert_context ---
+
+@pytest.mark.asyncio
+async def test_alert_context(mock_setup):
+    with respx.mock(base_url="http://airflow.test/api/v2") as router:
+        # DAG overview
+        router.get("/dags/etl").respond(json={
+            "dag_id": "etl",
+            "timetable_summary": "0 8 * * *",
+            "is_paused": False,
+            "owners": ["data-team"],
+            "tags": [],
+        })
+        # diagnose_dag_run internals
+        router.get("/dags/etl/dagRuns").respond(json={
+            "dag_runs": [{"dag_run_id": "fr1", "state": "failed",
+                          "start_date": "2026-04-13T00:00:00Z", "end_date": "2026-04-13T00:30:00Z"}]
+        })
+        router.get("/dags/etl/dagRuns/fr1/taskInstances").respond(json={
+            "task_instances": [
+                {"task_id": "load", "state": "failed", "try_number": 1},
+            ]
+        })
+        router.get("/dags/etl/dagRuns/fr1/taskInstances/load/logs/1").respond(
+            text="ERROR: table not found"
+        )
+        result = await srv.alert_context("etl")
+        assert "Alert Context: etl" in result
+        assert "0 8 * * *" in result
+        assert "data-team" in result
+        assert "table not found" in result
+
+
+# --- get_team_dags ---
+
+@pytest.mark.asyncio
+async def test_get_team_dags(mock_setup):
+    with respx.mock(base_url="http://airflow.test/api/v2") as router:
+        router.get("/dags").respond(json={
+            "dags": [
+                {"dag_id": "identity_user_sync", "owners": ["identity-team"], "tags": [], "is_paused": False},
+                {"dag_id": "payments_daily", "owners": ["payments"], "tags": [], "is_paused": False},
+                {"dag_id": "identity_audit", "owners": ["identity-team"], "tags": [{"name": "identity"}], "is_paused": True},
+            ]
+        })
+        result = await srv.get_team_dags("identity")
+        assert "identity_user_sync" in result
+        assert "identity_audit" in result
+        assert "payments_daily" not in result
+        assert "DAGs for team 'identity' (2)" in result
+
+
+@pytest.mark.asyncio
+async def test_get_team_dags_no_match(mock_setup):
+    with respx.mock(base_url="http://airflow.test/api/v2") as router:
+        router.get("/dags").respond(json={
+            "dags": [{"dag_id": "unrelated", "owners": ["other"], "tags": [], "is_paused": False}]
+        })
+        result = await srv.get_team_dags("identity")
+        assert "No DAGs found" in result
