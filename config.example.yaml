@@ -1,0 +1,28 @@
+# Airflow MCP Server Configuration
+# Copy to config.yaml and edit for your setup.
+
+# Default DDU used when no ddu parameter is passed to a tool.
+default_ddu: local
+
+# Map of DDU codes to Airflow instances.
+# Each entry needs a base_url and an auth section.
+instances:
+  local:
+    base_url: "http://localhost:8080"
+    auth:
+      type: basic
+      username: airflow
+      password: airflow
+
+  # Delivery Hero examples (uncomment and configure):
+  # eiga:
+  #   base_url: "https://airflow-eiga.datahub.deliveryhero.net"
+  #   auth:
+  #     type: dh_cookie
+  #     session_cookie: ""  # paste from browser
+  #
+  # paa:
+  #   base_url: "https://airflow-paa.datahub.deliveryhero.net"
+  #   auth:
+  #     type: dh_cookie
+  #     session_cookie: ""
